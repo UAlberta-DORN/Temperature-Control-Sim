@@ -73,7 +73,7 @@ class Root(Tk):
         self.K = StringVar()
         self.K.set(30)
         self.tau = StringVar()
-        self.tau.set(3600)
+        self.tau.set(6300)
         self.step_size = StringVar()
         self.step_size.set(1)
         self.initial_temp = StringVar()
@@ -122,6 +122,10 @@ class Root(Tk):
         self.status.set("None")
         self.csv_path = StringVar()
         self.csv_path.set("Temperature_Data.csv")
+        self.use_temp = BooleanVar()
+        self.use_temp.set(True)
+        self.outside_temp = StringVar()
+        self.outside_temp.set("-5,5")
         progress_bar_value = 0
         progress_bar_text = ""
 
@@ -148,7 +152,8 @@ class Root(Tk):
         self.date_frame.grid(column=1,
                              row=0,
                              padx=20,
-                             pady=10)
+                             pady=10,
+                             sticky=W)
         self.populate_data_frame()
 
         # Run Simulation
@@ -186,7 +191,8 @@ class Root(Tk):
         self.sensor_frame.grid(column=1,
                                row=1,
                                padx=20,
-                               pady=10)
+                               pady=10,
+                               sticky=W)
         self.populate_sensor_frame()
 
         # Control Parameters
@@ -196,7 +202,8 @@ class Root(Tk):
                                 row=0,
                                 rowspan=2,
                                 padx=20,
-                                pady=20)
+                                pady=20,
+                                sticky=W)
         self.populate_control_frame()
 
         # Status Selection
@@ -290,6 +297,23 @@ class Root(Tk):
                                         justify="center")
         self.initial_temp_entry.grid(column=1,
                                      row=3)
+
+        self.use_temp_checkbutton = Checkbutton(self.sim_parameter_frame,
+                                                text="use outside temperature data",
+                                                variable=self.use_temp)
+        self.use_temp_checkbutton.grid(column=0,
+                                       columnspan=2,
+                                       row=4)
+        self.outside_temp_label = Label(self.sim_parameter_frame,
+                                        text="Custom Outside Temperature [°C]")
+        self.outside_temp_label.grid(column=0,
+                                     row=5)
+        self.outside_temp_entry = Entry(self.sim_parameter_frame,
+                                        textvariable=self.outside_temp,
+                                        width=10,
+                                        justify="center")
+        self.outside_temp_entry.grid(column=1,
+                                     row=5)
 
     def populate_data_frame(self):
         self.start_date_label = Label(self.date_frame,
@@ -511,13 +535,17 @@ class Root(Tk):
             ref_str = self.ref.get().split(",")
             ref = [float(i) for i in ref_str]
 
+            out_str = self.outside_temp.get().split(",")
+            out_temp = [float(i) for i in out_str]
+
             sim = Simulation(start_date=start_date, end_date=end_date,
                              K=float(self.K.get()), tau=float(self.tau.get()),
                              step_size=float(self.step_size.get()),
                              P=float(self.P.get()), I=float(self.I.get()),
                              D=float(self.D.get()), ref=ref,
                              use_weighted_mean=self.use_weighted_mean.get(),
-                             status=self.status.get())
+                             status=self.status.get(), use_data=self.use_temp.get(),
+                             outside_temps=out_temp)
             t = threading.Thread(target=self.run_sim_thread,
                              args=(sim,
                                    float(self.initial_temp.get()),
@@ -615,7 +643,8 @@ class Root(Tk):
 
 class Simulation:
     def __init__(self, start_date=None, end_date=None, num_sensors=5, K=25, tau=15,
-                 step_size=15, use_weighted_mean=False, P=1, I=0, D=0, ref=None, status="None"):
+                 step_size=15, use_weighted_mean=False, P=1, I=0, D=0, ref=None, status="None",
+                 use_data=True, outside_temps=None):
 
         # Simulation Parameters
         self.K = K
@@ -637,9 +666,20 @@ class Simulation:
             start_date = [2019, 'October', 6, 0]
         if end_date is None:
             end_date = [2020, 'October', 5, 23]
+        if outside_temps is None:
+            outside_temps = [-5, 5]
         start_index = get_date_index(start_date)
         end_index = get_date_index(end_date)
-        self.ambient_temp = np.flip(EDMONTON_TEMP["Temperature"].to_numpy()[end_index : start_index + 1])
+        if use_data:
+            self.ambient_temp = np.flip(EDMONTON_TEMP["Temperature"].to_numpy()[end_index : start_index + 1])
+        else:
+            num_temps = len(outside_temps)
+            num_indices = start_index - end_index
+            self.ambient_temp = np.zeros(num_indices)
+            frac = int(num_indices / num_temps)
+            for i in range(num_temps):
+                self.ambient_temp[i * frac: (i + 1) * frac] = outside_temps[i]
+            self.ambient_temp[-1] = outside_temps[-1]
 
         # Sensor Array Setup
         self.num_sensors = num_sensors
@@ -762,7 +802,7 @@ class Simulation:
 
         ref = 20
         itau = 1 / self.tau
-        sim_len = 4
+        sim_len = 2
         outside_temp = 10
 
         for i in range(100):
