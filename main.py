@@ -1,5 +1,6 @@
 from tkinter import *
 from tkinter import ttk
+import skfuzzy as fuzz 
 import seaborn as sns
 import threading
 import pandas as pd
@@ -12,6 +13,8 @@ fontP = FontProperties()
 fontP.set_size('small')
 sns.set()
 
+import warnings
+warnings.simplefilter('ignore', np.RankWarning)
 
 EDMONTON_TEMP = pd.read_csv("Edmonton Year Long Temperature.csv")
 MONTH_DICT = {'January': "01",
@@ -71,7 +74,7 @@ class Root(Tk):
 
         # User Selected Variables
         self.K = StringVar()
-        self.K.set(30)
+        self.K.set(9)
         self.tau = StringVar()
         self.tau.set(6300)
         self.step_size = StringVar()
@@ -79,7 +82,7 @@ class Root(Tk):
         self.initial_temp = StringVar()
         self.initial_temp.set(20)
         self.start_year = StringVar()
-        self.start_year.set(2019)
+        self.start_year.set(2020)
         self.end_year = StringVar()
         self.end_year.set(2020)
         self.start_month = StringVar()
@@ -87,7 +90,7 @@ class Root(Tk):
         self.end_month = StringVar()
         self.end_month.set("October")
         self.start_day = StringVar()
-        self.start_day.set(6)
+        self.start_day.set(4)
         self.end_day = StringVar()
         self.end_day.set(5)
         self.start_hour = StringVar()
@@ -97,19 +100,19 @@ class Root(Tk):
         self.num_sensors = StringVar()
         self.num_sensors.set(5)
         self.measure_freq = StringVar()
-        self.measure_freq.set(15)
+        self.measure_freq.set(60)
         self.use_weighted_mean = BooleanVar()
         self.use_weighted_mean.set(False)
         self.P = StringVar()
-        self.P.set(1)
+        self.P.set(1.00880522)
         self.I = StringVar()
-        self.I.set(0)
+        self.I.set(7.99071717e-05)
         self.D = StringVar()
-        self.D.set(0)
+        self.D.set(7.65125255e-05)
         self.control_freq = StringVar()
         self.control_freq.set(60)
         self.ref = StringVar()
-        self.ref.set("20,15,20")
+        self.ref.set("23,20,23")
         self.plot_room = BooleanVar()
         self.plot_room.set(True)
         self.plot_outside = BooleanVar()
@@ -123,9 +126,9 @@ class Root(Tk):
         self.csv_path = StringVar()
         self.csv_path.set("Temperature_Data.csv")
         self.use_temp = BooleanVar()
-        self.use_temp.set(True)
+        self.use_temp.set(False)
         self.outside_temp = StringVar()
-        self.outside_temp.set("-5,5")
+        self.outside_temp.set("15")
         progress_bar_value = 0
         progress_bar_text = ""
 
@@ -536,6 +539,7 @@ class Root(Tk):
             ref = [float(i) for i in ref_str]
 
             out_str = self.outside_temp.get().split(",")
+
             out_temp = [float(i) for i in out_str]
 
             sim = Simulation(start_date=start_date, end_date=end_date,
@@ -592,10 +596,9 @@ class Root(Tk):
         self.is_calibrate_button_cancel = True
 
         pid = sim.calibrate(control_freq)
-        self.P.set(round(pid[0], 6))
-        self.I.set(round(pid[1], 6))
-        self.D.set(round(pid[2], 6))
-
+        self.P.set(round(pid[0], 15))
+        self.I.set(round(pid[1], 15))
+        self.D.set(round(pid[2], 15))
         self.calibrate_button['text'] = "Calibrate"
         self.is_calibrate_button_cancel = False
         is_thread_running = False
@@ -644,7 +647,7 @@ class Root(Tk):
 class Simulation:
     def __init__(self, start_date=None, end_date=None, num_sensors=5, K=25, tau=15,
                  step_size=15, use_weighted_mean=False, P=1, I=0, D=0, ref=None, status="None",
-                 use_data=True, outside_temps=None):
+                 use_data=True, outside_temps=[15]):
 
         # Simulation Parameters
         self.K = K
@@ -660,7 +663,10 @@ class Simulation:
             self.ref = [20]
         else:
             self.ref = ref
-
+        
+        # Fuzzy control memory
+        self.larsen_tensor={}
+            
         # Ambient Temperature
         if start_date is None:
             start_date = [2019, 'October', 6, 0]
@@ -668,6 +674,8 @@ class Simulation:
             end_date = [2020, 'October', 5, 23]
         if outside_temps is None:
             outside_temps = [-5, 5]
+        self.outside_temps=outside_temps
+        
         start_index = get_date_index(start_date)
         end_index = get_date_index(end_date)
         if use_data:
@@ -680,12 +688,12 @@ class Simulation:
             for i in range(num_temps):
                 self.ambient_temp[i * frac: (i + 1) * frac] = outside_temps[i]
             self.ambient_temp[-1] = outside_temps[-1]
-
+        
         # Sensor Array Setup
         self.num_sensors = num_sensors
         self.use_weighted_mean = use_weighted_mean
         self.status = status
-
+            
     def get_background_temp(self, t):
         floor_idx = np.floor(t).astype(int)
         ceil_idx = np.ceil(t).astype(int)
@@ -734,7 +742,119 @@ class Simulation:
 
         self.past_err = err
         self.temp_buffer = []
+        
+    def fuzzy_control(self, target_tempture, current_temp, past_temps,measure_freq,rules={}):
+        # set the current temperature in case the regular PID control is not called before this 
+        if len(self.temp_buffer)!=0:
+            self.m_temp = np.mean(self.temp_buffer)
+            current_temp=self.m_temp 
+            self.temp_buffer = []
+            
+        temp_change_th=round(self.K/2)
+        # fit the recent past temperature and get the slope
+        if len(past_temps)>2:
+            y=np.array(range(len(past_temps)))
+            temp_change=np.polyfit(past_temps, y, 1)[0]/len(past_temps)
+        else:
+            temp_change=0
+        
+        ## define the fuzzy membership function
+        # in the temperature universe
+        uni_temp = np.linspace(0, 100, num = 201)
+        cold_temp = 1-fuzz.membership.sigmf(uni_temp, 50-temp_change_th, 0.8)
+        good_temp = fuzz.membership.gaussmf(uni_temp, 50, 0.5)
+        hot_temp = fuzz.membership.sigmf(uni_temp, 50+temp_change_th, 0.8)
+        
+        # in the temperature change universe
+        uni_temp_change = np.linspace(0, 100, num = 201)
+        neg = 1-fuzz.membership.sigmf(uni_temp_change, 35, 0.5)
+        zero = fuzz.membership.gaussmf(uni_temp_change, 50, 10)
+        pos = fuzz.membership.sigmf(uni_temp_change, 65, 0.5)
+        
+        # in the heater switch universe
+        uni_switch = np.linspace(0, 100, num = 101)
+        off = fuzz.trapmf(uni_switch, [0, 0, 35, 45])
+        ignore = fuzz.trapmf(uni_switch, [35, 45, 55, 65])
+        on = fuzz.trapmf(uni_switch, [55, 65, 100, 100]) 
+        
+        # create the map so we can call the membership functions
+        membership_map={'temp':{'cold_temp':cold_temp,'good_temp':good_temp,'hot_temp':hot_temp},
+            'temp_change':{'neg':neg,'zero':zero,'pos':pos},
+            'switch':{'off':off,'ignore':ignore,'on':on}}
+        
+        # this is the rules for the fuzzy control. note for these rules would
+        #  only kick in when the current temperature is too cold or too hot
+        rules={'cold_temp':{'neg':'on','zero':'on','pos':'ignore'},
+        'good_temp':{'neg':'ignore','zero':'ignore','pos':'ignore'},
+        'hot_temp':{'neg':'ignore','zero':'off','pos':'off'}}
+        
+        # We want to store the generated tensors, since we expect to run mostly 
+        # the same temperature settings over and over again, so lets get the stored tensor
+        larsen_tensor_lib=self.larsen_tensor
+        compute_larsen_tensor=True
+        if str(target_tempture) in larsen_tensor_lib:
+            if str(temp_change_th) in larsen_tensor_lib[str(target_tempture)]:
+                compute_larsen_tensor=False
+                larsen_tensor=larsen_tensor_lib[str(target_tempture)][str(temp_change_th)]
+        # compute the larsen tensor if we need to
+        if compute_larsen_tensor:
+            larsen_tensor={}
+            for temp_mf in rules:
+                larsen_tensor[temp_mf]={}
+                for tpc_mf in rules[temp_mf]:
+                    # the larsen tensor for the particular membership functions
+                    larsen_tensor[temp_mf][tpc_mf]=fuzz.relation_product(membership_map['temp'][temp_mf], membership_map['temp_change'][tpc_mf])
+            self.larsen_tensor[str(target_tempture)]={}
+            self.larsen_tensor[str(target_tempture)][str(temp_change_th)]=larsen_tensor
+        
+        # map the universes to the real numbers instead of 0 to 100 scale
+        real_uni_temp=uni_temp/100*20+target_tempture-10
+        real_uni_temp_change=uni_temp_change/100*(temp_change_th*2)-temp_change_th
+        
+        # find the index of the closest spot in the universes
+        temp_index=min(range(len(uni_temp)), key=lambda i: abs(real_uni_temp[i]-current_temp))
+        temp_change_index=min(range(len(uni_temp_change)), key=lambda i: abs(real_uni_temp_change[i]-temp_change))
+        
+        # compute the result of each rules using larsen
+        results_of_each_rules=[]
+        for temp_mf in rules:
+            for tpc_mf in rules[temp_mf]:
+                fuzzySet = larsen_tensor[temp_mf][tpc_mf][temp_index,temp_change_index]\
+                            *membership_map['switch'][rules[temp_mf][tpc_mf]]
+                
+                results_of_each_rules.append(fuzzySet)
+                
+        # aggregate the rules (if/then/else) using max 
+        aggregate_max=np.amax(results_of_each_rules, axis=0)
+        
+        crisp_switch=fuzz.defuzz(uni_switch, aggregate_max, 'bisector')
+        crisp_switch=(crisp_switch-20.1)/69.79*2-1
 
+        crisp_switch=round(crisp_switch)
+
+        # old_heater_val=self.heater+0☺
+        if crisp_switch<0:
+            self.heater=0
+            # if old_heater_val!=self.heater:
+                # print(f'fuzzy switched {old_heater_val} to 0')
+        elif crisp_switch==0:
+            pass
+        elif crisp_switch>0:
+            self.heater=1
+            # if old_heater_val!=self.heater:
+                # print(f'fuzzy switched {old_heater_val} to 1')
+        
+        # clamp=0.3
+        # if current_temp-target_tempture>clamp:
+        #     self.heater=0
+        #     if old_heater_val!=self.heater:
+        #         print(f'limit switched {old_heater_val} to 0')
+        # elif current_temp-target_tempture<-clamp:
+        #     self.heater=1
+        #     if old_heater_val!=self.heater:
+        #         print(f'limit switched {old_heater_val} to 1')
+
+    
     def run_sim(self, initial_temp, measure_freq, control_freq):
         global progress_bar_value, progress_bar_text, cancel_sim
         progress_bar_text = "Simulating..."
@@ -771,6 +891,7 @@ class Simulation:
                 self.measure_temp(temp)
             if s % control_freq == 0:
                 self.control(ref)
+                self.fuzzy_control(ref, self.m_temp, measured_temperature[-measure_freq*10:],control_freq)
             if s % ref_freq == 0 and s != 0:
                 r_idx += 1
                 ref = self.ref[r_idx]
@@ -788,6 +909,7 @@ class Simulation:
                 break
         progress_bar_value = 0
         progress_bar_text = ""
+
         return time, room_temperature, outside_temperature, reference_temperature, \
                measured_temperature, heater_state
 
@@ -803,7 +925,8 @@ class Simulation:
         ref = 20
         itau = 1 / self.tau
         sim_len = 2
-        outside_temp = 10
+        outside_temp = sum(self.outside_temps)/len(self.outside_temps)
+
 
         for i in range(100):
             temp = 15
@@ -863,7 +986,7 @@ class Simulation:
             if tracking_err < smallest_err:
                 best_pid = pid
                 smallest_err = tracking_err
-
+                
             new_pid = np.array([0.0, 0.0, 0.0])
             new_pid[0] = pid[0] + itau * err_grads[0] / sim_len
             new_pid[1] = pid[1] + itau * err_grads[1] / sim_len
@@ -874,6 +997,7 @@ class Simulation:
                 break
         progress_bar_value = 0
         progress_bar_text = ""
+
         return best_pid
 
 
